@@ -1,0 +1,57 @@
+{
+  "name": "labora",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Laboratoare școlare, asistență live și proiecție în rețeaua locală",
+  "author": "SoftPrim",
+  "license": "UNLICENSED",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/index.mjs",
+    "setup": "node scripts/setup.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "dist:win": "electron-builder --win nsis --x64 --publish never",
+    "dev": "node tests/browser-harness.mjs",
+    "test:ui": "node tests/ui-integration.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "ro.softprim.labora",
+    "productName": "Labora",
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/InputBridge/publish",
+        "to": "input-bridge",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "Labora-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": false,
+      "include": "scripts/installer.nsh"
+    }
+  }
+}

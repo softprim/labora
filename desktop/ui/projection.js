@@ -1,0 +1,1 @@
+let last=0;window.projection.onFrame(frame=>{document.querySelector('#frame').src=frame;document.querySelector('#status').hidden=true;last=Date.now();});setInterval(()=>{if(Date.now()-last>2000){document.querySelector('#frame').removeAttribute('src');document.querySelector('#status').textContent='Flux întrerupt';document.querySelector('#status').hidden=false;}},1000);
