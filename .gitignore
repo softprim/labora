@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+*.pem
+*.key
+*.pfx
+device.json
+server-config.json
+native/**/bin/
+native/**/obj/
+native/**/publish/
+test-results/
+playwright-report/
+.env
