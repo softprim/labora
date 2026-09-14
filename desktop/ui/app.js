@@ -1,6 +1,6 @@
 /* Local Electron renderer: no credentials, file access or network authority. */
 const $=s=>document.querySelector(s), api=window.labora;
-let config,state,labId,view='grid',selectedId=null,controlId=null,projectId=null,layoutDirty=false;
+let config,state,labId,view='grid',selectedId=null,controlId=null,projectId=null,layoutDirty=false,moveMode=false,moveSource=null,layoutSaving=false;
 let lesson=false,capture=null,teacherId=null,modalAction,connected=false,projectionTimer,toastTimer,adminPoll,fallbackTimer,captureVideo;
 const peers=new Map(),earlyCandidates=new Map(),fallbackFrames=new Map();
 const hasFallback=id=>{const f=fallbackFrames.get(id);return !!(f?.ready&&Date.now()-f.at<3000);};
@@ -10,10 +10,10 @@ const currentLab=()=>state?.labs.find(x=>x.id===labId);
 const devices=()=>currentLab()?.devices.filter(d=>d.role==='student')||[];
 const selected=()=>devices().find(d=>d.id===selectedId);
 const planPreferences=new Map();
-function preferences(){const key=state.user.id+':'+labId;if(!planPreferences.has(key)){let rotation=0;try{rotation=Number(localStorage.getItem('labora-view:'+key))||0;}catch{}planPreferences.set(key,{rotation:((rotation%4)+4)%4,zoom:1});}return planPreferences.get(key);}
+function preferences(){const key=state.user.id+':'+labId;if(!planPreferences.has(key)){let rotation=0;try{const stored=Number(localStorage.getItem('labora-view:'+key));rotation=Number.isFinite(stored)?stored:0;}catch{}planPreferences.set(key,{rotation:((Math.trunc(rotation)%4)+4)%4,zoom:1});}return planPreferences.get(key);}
 function physicalSlots(){const lab=currentLab();return window.LaboraLayout.place(devices(),lab.layout,(lab.columns||4)*(lab.rows||4));}
 function orderedDevices(){return physicalSlots().filter(Boolean);}
-function moveDevice(id,targetSlot){if(state.user.role!=='admin')return;const slots=physicalSlots(),from=slots.findIndex(d=>d?.id===id),to=Number(targetSlot);if(from<0||!Number.isInteger(to)||to<0||to>=slots.length||from===to)return;[slots[from],slots[to]]=[slots[to],slots[from]];currentLab().layout=Object.fromEntries(slots.flatMap((d,slot)=>d?[[d.id,{slot}]]:[]));layoutDirty=true;renderRoom();toast('Poziția a fost actualizată. Salvează planul pentru a o păstra.');}
+function moveDevice(id,targetSlot){if(state.user.role!=='admin')return;const slots=physicalSlots(),from=slots.findIndex(d=>d?.id===id),to=Number(targetSlot);if(from<0||!Number.isInteger(to)||to<0||to>=slots.length||from===to)return;[slots[from],slots[to]]=[slots[to],slots[from]];currentLab().layout=Object.fromEntries(slots.flatMap((d,slot)=>d?[[d.id,{slot}]]:[]));layoutDirty=true;moveSource=null;renderRoom();requestAnimationFrame(()=>document.querySelector(`[data-device="${CSS.escape(id)}"]`)?.focus({preventScroll:true}));toast('Poziția a fost actualizată. Salvează planul pentru a o păstra.');}
 function toast(message,error=false){$('#toast').textContent=message;$('#toast').classList.remove('hidden');$('#toast').classList.toggle('error-toast',error);clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),6000);}
 async function action(fn){try{return await fn();}catch(e){toast(e.message,true);}}
 const send=m=>api.send(m);
@@ -40,19 +40,31 @@ function render(){
   renderRoom();renderDetail();
 }
 function renderRoom(){
-  const lab=currentLab(),room=$('#room'),isPlan=view!=='grid',pref=preferences();room.className=`room ${view}`;room.style.height='';$('#workspace').classList.toggle('plan-mode',isPlan);
+  const lab=currentLab(),room=$('#room'),isPlan=view!=='grid',pref=preferences();room.className=`room ${view}`;room.style.height='';room.style.maxHeight='';$('#workspace').classList.toggle('plan-mode',isPlan);
+  $('#move-pc').setAttribute('aria-pressed',String(moveMode));$('#move-pc').textContent=moveMode?'Încheie mutarea':'Mută calculatoare';$('#save-layout').disabled=!layoutDirty||layoutSaving;$('#room-hint').textContent=moveMode&&isPlan?'Selectează un PC, apoi locul destinație. Un loc ocupat schimbă cele două PC-uri. Escape anulează selecția.':isPlan&&state.user.role==='admin'?'Trage un PC sau folosește Mută calculatoare. Alt + săgeți mută din tastatură. Salvează planul.':'Selectează un calculator pentru a vedea ecranul și a oferi ajutor.';
   $('#plan-controls').classList.toggle('hidden',!isPlan);$('#view-direction').textContent=['Catedra sus','Catedra în dreapta','Catedra jos · Privirea profesorului','Catedra în stânga'][pref.rotation];$('#zoom-fit').textContent=pref.zoom===1?'Potrivește':Math.round(pref.zoom*100)+'%';
   const slots=physicalSlots();
-  function card(d,slot){return `<article class="device ${d.online?'':'offline'} ${d.help?'needs-help':''} ${selectedId===d.id?'selected':''}" tabindex="0" role="button" aria-label="${esc(d.name)}${d.online?', conectat':', offline'}" data-device="${esc(d.id)}" data-slot="${slot}" ${isPlan?`draggable="${state.user.role==='admin'}"`:''}><div class="screen-area"><div class="screen-placeholder"><span>▣</span>${d.online?(lesson?'Se așteaptă ecranul…':'Pregătit pentru oră'):'Calculator offline'}</div><video autoplay muted playsinline class="hidden"></video>${d.help?'<span class="help-badge">✋ Ajutor</span>':''}</div><div class="device-footer"><div><strong>${esc(d.name)}</strong><small>${isPlan?`Locul ${slot+1}`:d.online?'Conectat la laborator':'Offline'}</small></div><i class="status-dot"></i></div></article>`;}
+  function card(d,slot){return `<article class="device ${d.online?'':'offline'} ${d.help?'needs-help':''} ${selectedId===d.id?'selected':''} ${moveSource===d.id?'move-source':''}" tabindex="0" role="button" aria-label="${esc(d.name)}${d.online?', conectat':', offline'}" data-device="${esc(d.id)}" data-slot="${slot}" ${isPlan?`draggable="${state.user.role==='admin'}"`:''}><div class="screen-area"><div class="screen-placeholder"><span>▣</span>${d.online?(lesson?'Se așteaptă ecranul…':'Pregătit pentru oră'):'Calculator offline'}</div><video autoplay muted playsinline class="hidden"></video>${d.help?'<span class="help-badge">✋ Ajutor</span>':''}</div><div class="device-footer"><div><strong>${esc(d.name)}</strong><small>${isPlan?`Locul ${slot+1}`:d.online?'Conectat la laborator':'Offline'}</small></div><i class="status-dot"></i></div></article>`;}
   if(isPlan){const columns=lab.columns||4,rows=lab.rows||4,visualColumns=pref.rotation%2?rows:columns;
-    const cells=window.LaboraLayout.viewSlots(slots,columns,rows,pref.rotation).map(({device,slot})=>device?card(device,slot):`<div class="empty-slot" data-slot="${slot}" aria-label="Loc liber ${slot+1}"><span>＋</span><small>Loc liber ${slot+1}</small></div>`).join('');
-    room.innerHTML=`<div class="floor-stage facing-${pref.rotation}" style="width:${pref.zoom*100}%"><div class="teacher-desk">▣ Catedră</div><div class="floor-grid" style="grid-template-columns:repeat(${visualColumns},minmax(0,1fr))">${cells}</div></div>`;
+    const cells=window.LaboraLayout.viewSlots(slots,columns,rows,pref.rotation).map(({device,slot})=>device?card(device,slot):`<div class="empty-slot" tabindex="0" role="button" data-slot="${slot}" aria-label="Loc liber ${slot+1}"><span>＋</span><small>Loc liber ${slot+1}</small></div>`).join('');
+    room.innerHTML=`<div class="floor-viewport"><div class="floor-stage facing-${pref.rotation}"><div class="teacher-desk">▣ Catedră</div><div class="floor-grid" style="grid-template-columns:repeat(${visualColumns},minmax(0,1fr))">${cells}</div></div></div>`;
   }else room.innerHTML=slots.flatMap((d,slot)=>d?[card(d,slot)]:[]).join('');
   if(!devices().length&&!isPlan)room.innerHTML='<div class="empty"><h2>Adaugă calculatoarele laboratorului</h2><p>Configurează dimensiunea sălii, apoi înrolează calculatoarele.</p></div>';
   if(isPlan)requestAnimationFrame(fitFloor);
   for(const [id,p]of peers)if(p.stream)attachStream(id,p.stream);for(const id of fallbackFrames.keys())attachFrame(id);
 }
-function fitFloor(){const room=$('#room'),stage=room.querySelector('.floor-stage');if(!stage||!state)return;const width=Math.max(220,room.clientWidth-26),height=Math.max(240,Math.min(window.innerHeight*.68,window.innerHeight-room.getBoundingClientRect().top-30));room.style.maxHeight=height+'px';stage.style.width=width+'px';const scale=Math.min(1,(height-26)/Math.max(1,stage.scrollHeight));stage.style.width=Math.max(220,Math.floor(width*scale*preferences().zoom))+'px';}
+function fitFloor(){
+  const room=$('#room'),stage=room.querySelector('.floor-stage');if(!stage||!state)return;
+  const lab=currentLab(),turn=preferences().rotation,columns=turn%2?(lab.rows||4):(lab.columns||4);
+  const style=getComputedStyle(room),width=Math.max(1,room.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight));
+  const height=Math.max(Math.min(320,window.innerHeight*.5),Math.min(window.innerHeight*.68,window.innerHeight-room.getBoundingClientRect().top-30));
+  room.style.maxHeight=height+'px';
+  // Measure a stable logical grid, then scale both axes together. Text never changes cell geometry.
+  stage.style.width=(columns*144+(columns-1)*12+76)+'px';
+  const scale=Math.min(1,width/stage.offsetWidth,(height-28)/stage.offsetHeight)*preferences().zoom;
+  stage.style.transform=`scale(${scale})`;
+  const viewport=stage.parentElement;viewport.style.width=stage.offsetWidth*scale+'px';viewport.style.height=stage.offsetHeight*scale+'px';
+}
 let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(state&&view!=='grid')fitFloor();},120);});
 function attachFrame(id){
   const f=fallbackFrames.get(id);if(!f||Date.now()-f.at>=3000||peers.get(id)?.hasFrame)return;
@@ -88,26 +100,37 @@ $('#enroll-device').onclick=()=>modal('Adaugă un calculator',`<p class="muted">
 $('#manage-users').onclick=()=>modal('Adaugă profesor sau administrator',`<label>Nume complet<input name="name" required maxlength="100"></label><label>Utilizator<input name="username" required maxlength="100"></label><label>Parolă inițială<input name="password" type="password" required minlength="12" maxlength="256" autocomplete="new-password"></label><label>Rol<select name="role"><option value="teacher">Profesor</option><option value="admin">Administrator IT</option></select></label><p>Laboratoare accesibile profesorului</p><div class="checks">${state.labs.map(l=>`<label><input type="checkbox" name="labs" value="${esc(l.id)}">${esc(l.name)}</label>`).join('')}</div>`,'Creează contul',async data=>{await api.api('POST','/api/users',{name:data.get('name'),username:data.get('username'),password:data.get('password'),role:data.get('role'),labIds:data.getAll('labs')});$('#modal').close();toast('Contul a fost creat.');});
 $('#audit-button').onclick=()=>action(async()=>{const rows=await api.api('GET','/api/audit');modal('Jurnal de activitate',rows.reverse().map(r=>`<div class="audit-row"><strong>${esc(r.action)}</strong><small>${esc(new Date(r.at).toLocaleString('ro-RO'))} · ${esc(r.actorId)}<br>${esc(r.target)}</small></div>`).join('')||'<p>Nu există încă activitate.</p>',null,null);});
 $('#revoke-device').onclick=()=>modal('Revocă înrolarea',`<p>Calculatorul <strong>${esc(selected().name)}</strong> va fi deconectat și va necesita o nouă înrolare de către IT.</p>`,'Revocă acest calculator',async()=>{await api.api('POST','/api/revoke',{deviceId:selectedId});selectedId=null;$('#modal').close();await refresh();});
-$('#lab-nav').onclick=e=>{const el=e.target.closest('[data-lab]');if(el){if(layoutDirty){toast('Salvează planul înainte să schimbi laboratorul.',true);return;}labId=el.dataset.lab;selectedId=null;render();}};
+$('#lab-nav').onclick=e=>{const el=e.target.closest('[data-lab]');if(el){if(layoutDirty){toast('Salvează planul înainte să schimbi laboratorul.',true);return;}labId=el.dataset.lab;selectedId=null;moveSource=null;render();}};
 document.querySelectorAll('[data-view]').forEach(el=>el.onclick=()=>{view=el.dataset.view;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b===el));render();});
 
 function rotatePlan(delta){const pref=preferences();pref.rotation=(pref.rotation+delta+4)%4;try{localStorage.setItem('labora-view:'+state.user.id+':'+labId,String(pref.rotation));}catch{}renderRoom();}
 $('#rotate-left').onclick=()=>rotatePlan(-1);$('#rotate-right').onclick=()=>rotatePlan(1);
-$('#zoom-in').onclick=()=>{preferences().zoom=Math.min(3,preferences().zoom+.25);renderRoom();};
+$('#zoom-in').onclick=()=>{preferences().zoom=Math.min(6,preferences().zoom+.25);renderRoom();};
 $('#zoom-out').onclick=()=>{preferences().zoom=Math.max(.5,preferences().zoom-.25);renderRoom();};
 $('#zoom-fit').onclick=()=>{preferences().zoom=1;renderRoom();};
 $('#room-shape').onclick=()=>{if(layoutDirty){toast('Salvează mai întâi pozițiile modificate.',true);return;}const lab=currentLab();modal('Așezarea reală a sălii',`<p class="muted">Grila reprezintă locurile fizice. Lasă celulele libere pentru culoare sau bănci fără calculator. Rotirea schimbă doar perspectiva profesorului.</p><label>Locuri pe rând<input name="columns" type="number" min="2" max="12" required value="${lab.columns||4}"></label><label>Rânduri<input name="rows" type="number" min="1" max="16" required value="${lab.rows||4}"></label>`,'Actualizează sala',async data=>{await api.api('PUT','/api/room-shape',{labId,columns:Number(data.get('columns')),rows:Number(data.get('rows'))});$('#modal').close();await refresh();});};
 
-$('#save-layout').onclick=()=>action(async()=>{await api.api('PUT','/api/layout',{labId,layout:currentLab().layout});layoutDirty=false;toast('Planul laboratorului a fost salvat.');});
-$('#room').onclick=e=>{const card=e.target.closest('[data-device]');if(card){selectedId=card.dataset.device;renderDetail();}};
+$('#save-layout').onclick=()=>action(async()=>{if(layoutSaving)return;layoutSaving=true;const target=labId,snapshot=JSON.stringify(currentLab().layout);$('#save-layout').disabled=true;try{await api.api('PUT','/api/layout',{labId:target,layout:JSON.parse(snapshot)});if(labId===target&&JSON.stringify(currentLab().layout)===snapshot)layoutDirty=false;toast(layoutDirty?'Planul trimis a fost salvat. Salvează și mutările noi.':'Planul laboratorului a fost salvat.');}finally{layoutSaving=false;renderRoom();}});
+$('#move-pc').onclick=()=>{moveMode=!moveMode;moveSource=null;selectedId=null;$('#detail').classList.add('hidden');renderRoom();};
+function activateSlot(target){
+  if(moveMode&&view!=='grid'&&state.user.role==='admin'){
+    if(moveSource){moveDevice(moveSource,target.dataset.slot);moveSource=null;renderRoom();}
+    else if(target.dataset.device){moveSource=target.dataset.device;renderRoom();requestAnimationFrame(()=>document.querySelector(`[data-device="${CSS.escape(moveSource)}"]`)?.focus({preventScroll:true}));}
+    return;
+  }
+  if(target.dataset.device){selectedId=target.dataset.device;renderDetail();}
+}
+window.addEventListener('beforeunload',e=>{if(layoutDirty){e.preventDefault();e.returnValue='';}});
+$('#room').onclick=e=>{const target=e.target.closest('[data-slot]');if(target)activateSlot(target);};
 $('#room').onkeydown=e=>{
+  if(e.key==='Escape'){moveSource=null;renderRoom();return;}
   if(e.altKey&&['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)&&view!=='grid'&&state.user.role==='admin'){
     const lab=currentLab(),columns=lab.columns||4,rows=lab.rows||4,turn=preferences().rotation,visualColumns=turn%2?rows:columns;
     const all=window.LaboraLayout.viewSlots(physicalSlots(),columns,rows,turn),i=all.findIndex(x=>x.device?.id===e.target.dataset.device);
     const delta={ArrowLeft:-1,ArrowRight:1,ArrowUp:-visualColumns,ArrowDown:visualColumns}[e.key],target=i+delta;
     if(i>=0&&target>=0&&target<all.length&&(!(e.key==='ArrowLeft'||e.key==='ArrowRight')||Math.floor(i/visualColumns)===Math.floor(target/visualColumns))){e.preventDefault();moveDevice(e.target.dataset.device,all[target].slot);}return;
   }
-  if(['Enter',' '].includes(e.key)&&e.target.dataset.device){e.preventDefault();selectedId=e.target.dataset.device;renderDetail();}
+  if(['Enter',' '].includes(e.key)&&e.target.hasAttribute('data-slot')){e.preventDefault();activateSlot(e.target);}
 };
 function findHelp(){const waiting=devices().filter(d=>d.help).sort((a,b)=>a.help.at-b.help.at);if(!waiting.length){toast('Nu există cereri de ajutor în acest laborator.');return;}const next=waiting[(waiting.findIndex(d=>d.id===selectedId)+1)%waiting.length];selectedId=next.id;view='map';document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));render();document.querySelector(`[data-device="${CSS.escape(next.id)}"]`)?.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});}
 $('#find-help').onclick=findHelp;$('#find-help').onkeydown=e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();findHelp();}};
@@ -202,3 +225,4 @@ api.onEvent(m=>action(async()=>{
 setInterval(()=>{let changed=false;for(const [id,f]of fallbackFrames)if(Date.now()-f.at>=3000){fallbackFrames.delete(id);changed=true;}if(changed&&state){renderRoom();renderDetail();}},1000);
 async function init(){config=await api.config();$('#server-url').value=config.serverUrl;$('#server-url').readOnly=config.managed;if(config.role==='student'){show('student');$('#student-name').textContent=config.name;}else show('login');$('#clock').textContent=new Date().toLocaleDateString('ro-RO',{day:'numeric',month:'short'});}
 init().catch(e=>toast(e.message,true));
+

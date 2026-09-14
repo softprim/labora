@@ -32,3 +32,17 @@
 @media(max-width:760px){.plan-controls{padding:0 14px 14px;gap:8px}.plan-controls button{padding:7px 8px;font-size:10px}.room.map,.room.space{padding:6px}.floor-stage{grid-template-columns:18px minmax(0,1fr) 18px;grid-template-rows:23px auto 23px;gap:3px}.floor-stage .teacher-desk{font-size:8px}.floor-stage.facing-1 .teacher-desk,.floor-stage.facing-3 .teacher-desk{width:18px}.room.map .device,.room.space .device{max-width:none}}
 #find-help{cursor:pointer;transition:border-color .15s}#find-help:hover{border-color:#d9b65f}#find-help:focus-visible{outline:3px solid #d9b65f;outline-offset:2px}
 .plan-mode .topbar{height:56px}.plan-mode .main-content{padding-top:20px}.plan-mode .page-heading{margin-bottom:16px}.plan-mode .page-heading .eyebrow{display:none}.plan-mode .page-heading h1{font-size:27px;margin-bottom:7px}.plan-mode .stats{margin-bottom:16px}.plan-mode .stats article{padding:12px 16px}.plan-mode .stat-icon{width:30px;height:30px;font-size:18px}.plan-mode .stats strong{font-size:20px}.plan-mode .stats p{margin-top:3px}.plan-mode .room-toolbar{padding-top:12px;padding-bottom:12px}.plan-mode .room-subbar{padding-top:12px;padding-bottom:12px}
+
+
+/* A fixed logical canvas scales uniformly inside a scrollable viewport. */
+.floor-viewport{position:relative;margin:0 auto;flex-shrink:0;overflow:hidden}
+.floor-stage{position:absolute;left:0;top:0;min-width:0;margin:0;transform-origin:top left;transition:none;grid-template-columns:26px minmax(0,1fr) 26px;grid-template-rows:26px auto 26px;gap:12px}
+.floor-grid{gap:12px;grid-auto-rows:112px}
+.floor-grid .device,.floor-grid .empty-slot{height:112px;aspect-ratio:auto}
+.floor-stage .teacher-desk{position:static;inset:auto;font-size:10px}
+.floor-stage.facing-1 .teacher-desk,.floor-stage.facing-3 .teacher-desk{width:26px}
+.floor-grid .device-footer>div{min-width:0}.floor-grid .device-footer strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.floor-grid .device.move-source{outline:3px solid #24765c;outline-offset:2px}
+.floor-grid [data-slot]:focus-visible{outline:3px solid #24765c;outline-offset:2px}
+#move-pc[aria-pressed="true"]{background:#e0f0e7;color:#245b44}
+.room-toolbar,.toolbar-actions,.room-subbar{flex-wrap:wrap}.room-footer{gap:10px}.room-footer>span{min-width:0}
