@@ -3,20 +3,20 @@ import https from 'node:https';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { Store, Fault, requireThat, verifyPassword, secret, digest } from './domain.mjs';
+import { Store, Fault, requireThat, verifyPassword, secret, digest, ADMIN_ROLES } from './domain.mjs';
 
 export function createApp({store=new Store(),tls,host='127.0.0.1'}={}) {
   requireThat(tls || ['127.0.0.1','::1','localhost'].includes(host),500,'HTTPS obligatoriu pentru acces în rețea.');
   const sessions=new Map(), peers=new Map(), lessons=new Map(), helps=new Map(), rates=new Map();
   const send=(ws,data)=>{if(ws?.readyState===WebSocket.OPEN && ws.bufferedAmount<1024*1024) ws.send(JSON.stringify(data));};
   const publicDevice=d=>({id:d.id,name:d.name,role:d.role,labId:d.labId,online:peers.has(d.id),help:helps.get(d.id)||null});
-  const state=(actor)=>({school:store.data.schools.find(x=>x.id===actor.schoolId),user:{id:actor.id,name:actor.name,role:actor.role},labs:store.data.labs.filter(x=>x.schoolId===actor.schoolId && (actor.role==='admin'||actor.labIds.includes(x.id))).map(l=>({...l,lesson:lessons.has(l.id)?{teacher:lessons.get(l.id).teacherName,owned:lessons.get(l.id).userId===actor.id}:null,devices:store.data.devices.filter(d=>d.labId===l.id&&!d.revoked).map(publicDevice)}))});
+  const state=(actor)=>({school:store.data.schools.find(x=>x.id===actor.schoolId),user:{id:actor.id,name:actor.name,role:actor.role},labs:store.data.labs.filter(x=>x.schoolId===actor.schoolId && (actor.role==='admin'||actor.labIds?.includes(x.id))).map(l=>({...l,lesson:lessons.has(l.id)?{teacher:lessons.get(l.id).teacherName,owned:lessons.get(l.id).userId===actor.id}:null,devices:store.data.devices.filter(d=>d.labId===l.id&&!d.revoked).map(publicDevice)}))});
   const broadcast=()=>{for(const p of peers.values()) if(p.actor) send(p.ws,{type:'state',data:state(p.actor)});};
   const stopLesson=labId=>{
     const lesson=lessons.get(labId); if(!lesson)return;
     lessons.delete(labId);
     for(const p of peers.values())if(p.device.labId===labId)send(p.ws,{type:'lesson-ended'});
-    store.audit({id:lesson.userId,schoolId:lesson.schoolId},'lesson.end',labId); broadcast();
+    store.audit({id:lesson.userId,schoolId:lesson.schoolId},'lesson.end',labId,labId); broadcast();
   };
   const sessionActor=token=>{const s=typeof token==='string'&&sessions.get(digest(token)); return s&&s.expires>Date.now()?store.data.users.find(u=>u.id===s.userId):null;};
   function rate(key,max=120,window=60000) { const now=Date.now(); let r=rates.get(key);if(!r||now-r.start>window){r={start:now,n:0};rates.set(key,r);}requireThat(++r.n<=max,429,'Prea multe cereri. Încercați mai târziu.'); }
@@ -49,9 +49,15 @@ export function createApp({store=new Store(),tls,host='127.0.0.1'}={}) {
         else if(req.method==='PUT'&&path==='/api/layout')result=store.layout(actor,b.labId,b.layout);
         else if(req.method==='PUT'&&path==='/api/room-shape')result=store.shape(actor,b.labId,b.columns,b.rows);
         else if(req.method==='POST'&&path==='/api/revoke'){
-          store.admin(actor);const d=store.data.devices.find(x=>x.id===b.deviceId&&x.schoolId===actor.schoolId);requireThat(d,404);
-          d.revoked=true;peers.get(d.id)?.ws.close(4003,'Revoked');helps.delete(d.id);store.audit(actor,'device.revoke',d.id);result={ok:true};
-        }else if(req.method==='GET'&&path==='/api/audit') {store.admin(actor);result=store.data.audit.filter(x=>x.schoolId===actor.schoolId).slice(-200);}
+          const d=store.data.devices.find(x=>x.id===b.deviceId&&x.schoolId===actor.schoolId);requireThat(d,404);
+          store.admin(actor,d.labId);
+          d.revoked=true;peers.get(d.id)?.ws.close(4003,'Revoked');helps.delete(d.id);store.audit(actor,'device.revoke',d.id,d.labId);result={ok:true};
+        }else if(req.method==='GET'&&path==='/api/audit') {
+          requireThat(ADMIN_ROLES.includes(actor.role),403,'Doar administratorul poate vedea jurnalul.');
+          const own=actor.role==='admin'?null:new Set(actor.labIds||[]);
+          const visible=x=>!own||(x.labId?own.has(x.labId):x.actorId===actor.id);
+          result=store.data.audit.filter(x=>x.schoolId===actor.schoolId&&visible(x)).slice(-200);
+        }
         else throw new Fault(404,'Ruta nu există.');
       }
       broadcast();res.end(JSON.stringify(result));
@@ -82,7 +88,7 @@ export function createApp({store=new Store(),tls,host='127.0.0.1'}={}) {
         if(m.type==='lesson-start'){
           requireThat(peer.actor,403);requireThat(!lesson,409,'Laboratorul are deja o oră activă.');
           lessons.set(labId,{deviceId:peer.device.id,userId:peer.actor.id,schoolId:peer.actor.schoolId,teacherName:peer.actor.name,control:null});
-          store.audit(peer.actor,'lesson.start',labId);
+          store.audit(peer.actor,'lesson.start',labId,labId);
           for(const p of peers.values())if(p.device.labId===labId&&(p.device.role==='student'||p===peer))send(p.ws,{type:'lesson-started',teacherId:peer.device.id,teacherName:peer.actor.name});broadcast();return;
         }
         if(m.type==='lesson-stop'){requireThat(lesson?.deviceId===peer.device.id,403);stopLesson(labId);return;}
@@ -107,13 +113,13 @@ export function createApp({store=new Store(),tls,host='127.0.0.1'}={}) {
         const target=peers.get(m.to);requireThat(target&&target.device.labId===labId&&target.device.role==='student',403);
         if(m.type==='control-start'){
           if(lesson.control)send(peers.get(lesson.control)?.ws,{type:'control',enabled:false});lesson.control=m.to;
-          store.audit(peer.actor,'control.start',m.to);send(target.ws,{type:'control',enabled:true});send(ws,{type:'control-started',deviceId:m.to});
+          store.audit(peer.actor,'control.start',m.to,labId);send(target.ws,{type:'control',enabled:true});send(ws,{type:'control-started',deviceId:m.to});
         }else if(m.type==='input'){
           requireThat(lesson.control===m.to,403);requireThat(validInput(m.event));send(target.ws,{type:'input',event:m.event});
         }else if(m.type==='message'){
           requireThat(typeof m.text==='string'&&m.text.length>0&&m.text.length<=500);send(target.ws,{type:'message',text:m.text});
         }else if(m.type==='help-resolve'){helps.delete(m.to);broadcast();}
-        else if(m.type==='project'){store.audit(peer.actor,'projection.start',m.to);send(target.ws,{type:'projected'});send(ws,{type:'project-approved',deviceId:m.to});}
+        else if(m.type==='project'){store.audit(peer.actor,'projection.start',m.to,labId);send(target.ws,{type:'projected'});send(ws,{type:'project-approved',deviceId:m.to});}
         else throw new Fault(400,'Comandă necunoscută.');
       }catch(e){send(ws,{type:'error',message:e.status?e.message:'Mesaj invalid.'});if(e.status===401)ws.close(4001);}
     });
@@ -134,10 +140,34 @@ export function validInput(e){
   if(e.kind==='key')return typeof e.key==='string'&&(/^[a-zA-Z0-9]$/.test(e.key)||['Enter','Backspace','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key));
   return false;
 }
+// Materialul TLS: certificat furnizat de IT, altfel unul auto-semnat generat pe calculatorul
+// profesorului. Pe loopback rămâne opțional, ca dezvoltarea să nu ceară certificat.
+export async function resolveTls({host,dir}={}) {
+  if (process.env.LABORA_TLS_CERT && process.env.LABORA_TLS_KEY)
+    return {cert:readFileSync(process.env.LABORA_TLS_CERT),key:readFileSync(process.env.LABORA_TLS_KEY)};
+  if (['127.0.0.1','::1','localhost'].includes(host)) return undefined;
+  const {ensureCertificate}=await import('./certificate.mjs');
+  const {pfx,passphrase,names,fingerprint}=ensureCertificate(dir||process.env.LABORA_CERT_DIR||undefined);
+  return {pfx,passphrase,names,fingerprint};
+}
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   const host=process.env.LABORA_HOST||'127.0.0.1';
-  const tls=process.env.LABORA_TLS_CERT&&process.env.LABORA_TLS_KEY?{cert:readFileSync(process.env.LABORA_TLS_CERT),key:readFileSync(process.env.LABORA_TLS_KEY)}:undefined;
+  const tls=await resolveTls({host});
   const app=createApp({store:new Store(process.env.LABORA_DATA||'data/store.json'),host,tls});
   requireThat(app.store.data.users.length,500,'Rulați npm run setup înainte de pornire.');
-  app.server.listen(Number(process.env.LABORA_PORT||4310),host,()=>console.log(`Labora: ${tls?'https':'http'}://${host}:${process.env.LABORA_PORT||4310}`));
+  const port=Number(process.env.LABORA_PORT||4310);
+  app.server.listen(port,host,async()=>{
+    console.log(`Labora: ${tls?'https':'http'}://${host}:${port}`);
+    if(tls?.names)console.log(`Certificat pentru: ${tls.names.join(', ')}`);
+    // Anunțarea în LAN pornește doar pe calculatorul profesorului, peste HTTPS.
+    if(process.env.LABORA_ADVERTISE==='1'&&tls){
+      const {advertise}=await import('./discovery.mjs');
+      const {localAddresses}=await import('./certificate.mjs');
+      const address=localAddresses()[0];
+      if(address){
+        advertise({url:`https://${address}:${port}`,fingerprint:tls.fingerprint||''});
+        console.log(`Anunțat în rețea: https://${address}:${port}`);
+      }
+    }
+  });
 }

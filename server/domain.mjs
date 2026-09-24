@@ -15,6 +15,8 @@ export function verifyPassword(password, encoded) {
   const [salt, hash] = encoded.split(':');
   return timingSafeEqual(Buffer.from(hash,'hex'),scryptSync(password,salt,64));
 }
+export const ADMIN_ROLES = ['admin','lab-admin'];
+export const ASSIGNABLE_ROLES = ['teacher','admin','lab-admin'];
 export const name = value => { requireThat(typeof value === 'string' && value.trim().length > 0 && value.length <= 100); return value.trim(); };
 export class Store {
   constructor(path) {
@@ -27,8 +29,8 @@ export class Store {
     writeFileSync(`${this.path}.tmp`,JSON.stringify(this.data,null,2),{mode:0o600});
     renameSync(`${this.path}.tmp`,this.path);
   }
-  audit(actor, action, target) {
-    this.data.audit.push({id:randomUUID(),at:new Date().toISOString(),schoolId:actor.schoolId,actorId:actor.id,action,target});
+  audit(actor, action, target, labId) {
+    this.data.audit.push({id:randomUUID(),at:new Date().toISOString(),schoolId:actor.schoolId,actorId:actor.id,action,target,...(labId?{labId}:{})});
     this.data.audit=this.data.audit.slice(-10000); this.save();
   }
   bootstrap(schoolName, username, password) {
@@ -37,28 +39,39 @@ export class Store {
     const user={id:randomUUID(),schoolId:school.id,name:'Administrator IT',username:name(username).toLowerCase(),passwordHash:passwordHash(password),role:'admin',labIds:[]};
     this.data.schools.push(school); this.data.users.push(user); this.save(); return school;
   }
-  admin(actor) { requireThat(actor?.role==='admin',403,'Doar administratorul IT poate modifica această setare.'); }
+  // Rolurile de administrare: 'admin' acoperă toată școala, 'lab-admin' doar laboratoarele din labIds.
+  admin(actor, labId) {
+    requireThat(ADMIN_ROLES.includes(actor?.role),403,'Doar administratorul poate modifica această setare.');
+    if (actor.role === 'lab-admin') {
+      requireThat(labId !== undefined,403,'Administratorul de laborator nu poate modifica setările școlii.');
+      requireThat(actor.labIds?.includes(labId),403,'Nu aveți acces la acest laborator.');
+    }
+  }
   lab(actor,id) {
     const lab=this.data.labs.find(x=>x.id===id && x.schoolId===actor.schoolId);
     requireThat(lab && (actor.role==='admin' || actor.labIds?.includes(id)),403,'Nu aveți acces la acest laborator.'); return lab;
   }
   createLab(actor, body) {
-    this.admin(actor); const lab={id:randomUUID(),schoolId:actor.schoolId,name:name(body.name),columns:4,rows:4,layout:{}};
-    this.data.labs.push(lab); this.audit(actor,'lab.create',lab.id); return lab;
+    requireThat(actor?.role==='admin',403,'Doar administratorul IT poate crea laboratoare.'); const lab={id:randomUUID(),schoolId:actor.schoolId,name:name(body.name),columns:4,rows:4,layout:{}};
+    this.data.labs.push(lab); this.audit(actor,'lab.create',lab.id,lab.id); return lab;
   }
   createUser(actor, body) {
-    this.admin(actor); requireThat(['teacher','admin'].includes(body.role));
+    requireThat(ADMIN_ROLES.includes(actor?.role),403,'Doar administratorul poate crea conturi.');
+    requireThat(ASSIGNABLE_ROLES.includes(body.role));
+    // Un lab-admin nu poate crea administratori de școală și nici acorda laboratoare pe care nu le are.
+    requireThat(actor.role==='admin'||body.role!=='admin',403,'Nu puteți crea un administrator de școală.');
     const username=name(body.username).toLowerCase();
     requireThat(!this.data.users.some(x=>x.username===username),409,'Numele de utilizator există deja.');
-    requireThat(Array.isArray(body.labIds)); body.labIds.forEach(id=>this.lab(actor,id));
+    requireThat(Array.isArray(body.labIds)&&body.labIds.length<=200);
+    body.labIds.forEach(id=>{this.admin(actor,id);this.lab(actor,id);});
     const user={id:randomUUID(),schoolId:actor.schoolId,name:name(body.name),username,passwordHash:passwordHash(body.password),role:body.role,labIds:[...new Set(body.labIds)]};
     this.data.users.push(user); this.audit(actor,'user.create',user.id); const {passwordHash:_,...safe}=user; return safe;
   }
   enrollment(actor, body) {
-    this.admin(actor); this.lab(actor,body.labId); requireThat(['student','teacher'].includes(body.role));
+    this.admin(actor,body.labId); this.lab(actor,body.labId); requireThat(['student','teacher'].includes(body.role));
     const token=secret(); const record={id:randomUUID(),schoolId:actor.schoolId,labId:body.labId,name:name(body.name),role:body.role,hash:digest(token),expires:Date.now()+15*60*1000};
     this.data.enrollments=this.data.enrollments.filter(x=>x.expires>Date.now());
-    this.data.enrollments.push(record); this.audit(actor,'device.enrollment',record.id); return {token,expires:record.expires};
+    this.data.enrollments.push(record); this.audit(actor,'device.enrollment',record.id,record.labId); return {token,expires:record.expires};
   }
   enroll(token) {
     requireThat(typeof token==='string',401,'Cod invalid.'); const hash=digest(token);
@@ -71,12 +84,12 @@ export class Store {
       const capacity=(lab.columns||4)*(lab.rows||4);requireThat(occupied<capacity,409,'Planul este plin. IT trebuie să mărească grila laboratorului.');
     }
     this.data.devices.push(device); this.data.enrollments=this.data.enrollments.filter(x=>x!==record);
-    this.audit({id:device.id,schoolId:device.schoolId},'device.enroll',device.id);
+    this.audit({id:device.id,schoolId:device.schoolId},'device.enroll',device.id,device.labId);
     return {deviceId:device.id,deviceToken,labId:device.labId,role:device.role,name:device.name};
   }
   device(token) { return typeof token==='string' ? this.data.devices.find(x=>!x.revoked && x.tokenHash===digest(token)) : undefined; }
   layout(actor,labId,layout) {
-    this.admin(actor); const lab=this.lab(actor,labId);
+    this.admin(actor,labId); const lab=this.lab(actor,labId);
     requireThat(layout && typeof layout==='object' && !Array.isArray(layout));
     const devices=this.data.devices.filter(d=>d.labId===labId&&!d.revoked&&d.role==='student');const slots=new Set();
     for (const [id,p] of Object.entries(layout)) {
@@ -84,10 +97,10 @@ export class Store {
       requireThat(p&&Number.isInteger(p.slot)&&p.slot>=0&&p.slot<(lab.columns||4)*(lab.rows||4),400,'Poziție invalidă în plan.');
       requireThat(!slots.has(p.slot),400,'Două calculatoare nu pot ocupa același loc.');slots.add(p.slot);
     }
-    lab.layout=layout; this.audit(actor,'lab.layout',labId); return lab;
+    lab.layout=layout; this.audit(actor,'lab.layout',labId,labId); return lab;
   }
   shape(actor,labId,columns,rows){
-    this.admin(actor);const lab=this.lab(actor,labId);
+    this.admin(actor,labId);const lab=this.lab(actor,labId);
     requireThat(Number.isInteger(columns)&&columns>=2&&columns<=12&&Number.isInteger(rows)&&rows>=1&&rows<=16,400,'Grila acceptă 2–12 coloane și 1–16 rânduri.');
     const devices=this.data.devices.filter(d=>d.labId===labId&&!d.revoked&&d.role==='student');
     requireThat(columns*rows>=devices.length,400,'Grila nu are suficiente locuri pentru toate calculatoarele.');
@@ -96,6 +109,6 @@ export class Store {
     for(const d of devices)if(!positions.has(d.id)){let slot=0;while(used.has(slot))slot++;positions.set(d.id,slot);used.add(slot);}
     const layout={};for(const [id,slot]of positions){const row=Math.floor(slot/previousColumns),column=slot%previousColumns;
       requireThat(row<rows&&column<columns,409,'Există PC-uri în zona eliminată. Mutați-le pe locuri păstrate înainte de micșorarea grilei.');layout[id]={slot:row*columns+column};}
-    lab.columns=columns;lab.rows=rows;lab.layout=layout;this.audit(actor,'lab.shape',labId);return lab;
+    lab.columns=columns;lab.rows=rows;lab.layout=layout;this.audit(actor,'lab.shape',labId,labId);return lab;
   }
 }

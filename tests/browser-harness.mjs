@@ -2,7 +2,7 @@
 // Uses the REAL domain, API and WebSocket server with synthetic identities/media.
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import { resolve,extname } from 'node:path';
+import { resolve,extname,sep } from 'node:path';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { Store } from '../server/domain.mjs';
@@ -55,7 +55,7 @@ const harness=http.createServer(async(req,res)=>{
     if(['/', '/teacher','/student','/admin'].includes(u.pathname)){
       const role=u.pathname.slice(1)||'teacher';let html=readFileSync(resolve(ui,'index.html'),'utf8');html=html.replace("connect-src 'self'","connect-src 'self'").replace('<script src="app.js">',`<script src="bridge.js?role=${role}"></script><script src="app.js">`);res.setHeader('Content-Type','text/html');res.end(html);return;
     }
-    const file=resolve(ui,'.'+u.pathname);if(!file.startsWith(ui+'/'))throw Error('Invalid path');res.setHeader('Content-Type',({'.js':'application/javascript','.css':'text/css','.html':'text/html'})[extname(file)]||'application/octet-stream');res.end(readFileSync(file));
+    const file=resolve(ui,'.'+u.pathname);if(!file.startsWith(ui+sep))throw Error('Invalid path');res.setHeader('Content-Type',({'.js':'application/javascript','.css':'text/css','.html':'text/html'})[extname(file)]||'application/octet-stream');res.end(readFileSync(file));
   }catch(e){res.statusCode=400;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({error:e.message}));}
 });
 const portFlag=process.argv.indexOf('--port');const port=Number(portFlag>=0?process.argv[portFlag+1]:process.env.PORT||4311);

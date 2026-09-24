@@ -123,3 +123,75 @@ test('LAN listener refuses plaintext HTTP and input API accepts no arbitrary com
   assert.throws(()=>createApp({host:'0.0.0.0'}),/HTTPS/);
   assert.equal(validInput({kind:'shell',command:'whoami'}),false);assert.equal(validInput({kind:'key',key:'Control'}),false);assert.equal(validInput({kind:'pointer',x:Infinity,y:0,action:'click'}),false);assert.equal(validInput({kind:'pointer',x:.5,y:.5,action:'click'}),true);
 });
+
+test('A laboratory administrator manages only its own laboratory',async t=>{
+  const f=await fixture(t);
+  const labAdmin=f.store.createUser(f.admin,{name:'Admin Lab 1',username:'adminlab1',password,role:'lab-admin',labIds:[f.lab.id]});
+  assert.equal(labAdmin.role,'lab-admin');
+  const {data:{token}}=await f.request('POST','/api/login',{username:'adminlab1',password});
+
+  // Vede doar laboratorul propriu.
+  const state=await f.request('GET','/api/state',undefined,token);
+  assert.equal(state.data.labs.length,1);
+  assert.equal(state.data.labs[0].id,f.lab.id);
+
+  // Poate administra laboratorul propriu.
+  assert.equal((await f.request('POST','/api/enrollments',{labId:f.lab.id,name:'PC-02',role:'student'},token)).status,200);
+  assert.equal((await f.request('PUT','/api/room-shape',{labId:f.lab.id,columns:5,rows:5},token)).status,200);
+  assert.equal((await f.request('PUT','/api/layout',{labId:f.lab.id,layout:{}},token)).status,200);
+
+  // Nu poate atinge alt laborator.
+  assert.equal((await f.request('POST','/api/enrollments',{labId:f.other.id,name:'PC-Y',role:'student'},token)).status,403);
+  assert.equal((await f.request('PUT','/api/room-shape',{labId:f.other.id,columns:5,rows:5},token)).status,403);
+  assert.equal((await f.request('PUT','/api/layout',{labId:f.other.id,layout:{}},token)).status,403);
+  assert.equal((await f.request('POST','/api/revoke',{deviceId:f.stranger.deviceId},token)).status,403);
+
+  // Nu poate crea laboratoare noi: e o operație la nivel de școală.
+  assert.equal((await f.request('POST','/api/labs',{name:'Lab nou'},token)).status,403);
+
+  // Revocarea în laboratorul propriu funcționează.
+  assert.equal((await f.request('POST','/api/revoke',{deviceId:f.student.deviceId},token)).status,200);
+});
+
+test('A laboratory administrator cannot escalate its own privileges',async t=>{
+  const f=await fixture(t);
+  f.store.createUser(f.admin,{name:'Admin Lab 1',username:'adminlab1',password,role:'lab-admin',labIds:[f.lab.id]});
+  const {data:{token}}=await f.request('POST','/api/login',{username:'adminlab1',password});
+
+  // Nu poate crea un administrator de școală.
+  assert.equal((await f.request('POST','/api/users',{name:'X',username:'x1',password,role:'admin',labIds:[f.lab.id]},token)).status,403);
+  // Nu poate acorda un laborator pe care nu îl administrează.
+  assert.equal((await f.request('POST','/api/users',{name:'Y',username:'y1',password,role:'teacher',labIds:[f.other.id]},token)).status,403);
+  assert.equal((await f.request('POST','/api/users',{name:'Z',username:'z1',password,role:'teacher',labIds:[f.lab.id,f.other.id]},token)).status,403);
+  // Nu poate crea un alt lab-admin peste alt laborator.
+  assert.equal((await f.request('POST','/api/users',{name:'W',username:'w1',password,role:'lab-admin',labIds:[f.other.id]},token)).status,403);
+  // Poate crea un profesor în laboratorul propriu.
+  const ok=await f.request('POST','/api/users',{name:'Profesor 2',username:'profesor2',password,role:'teacher',labIds:[f.lab.id]},token);
+  assert.equal(ok.status,200);
+  assert.equal(ok.data.role,'teacher');
+  assert.equal(JSON.stringify(ok.data).includes('passwordHash'),false);
+});
+
+test('The audit log is scoped to the laboratories an administrator manages',async t=>{
+  const f=await fixture(t);
+  f.store.createUser(f.admin,{name:'Admin Lab 1',username:'adminlab1',password,role:'lab-admin',labIds:[f.lab.id]});
+  const {data:{token}}=await f.request('POST','/api/login',{username:'adminlab1',password});
+  // Activitate în ambele laboratoare, făcută de administratorul școlii.
+  f.store.enrollment(f.admin,{labId:f.other.id,name:'PC-Z',role:'student'});
+  f.store.enrollment(f.admin,{labId:f.lab.id,name:'PC-03',role:'student'});
+
+  const mine=await f.request('GET','/api/audit',undefined,token);
+  assert.equal(mine.status,200);
+  assert.ok(mine.data.length>0);
+  // Nicio înregistrare marcată cu alt laborator nu este vizibilă.
+  assert.equal(mine.data.some(x=>x.labId===f.other.id),false);
+  assert.ok(mine.data.some(x=>x.labId===f.lab.id));
+
+  // Administratorul școlii vede tot.
+  const all=await f.request('POST','/api/login',{username:'admin',password});
+  const full=await f.request('GET','/api/audit',undefined,all.data.token);
+  assert.ok(full.data.some(x=>x.labId===f.other.id));
+
+  // Profesorul nu are acces la jurnal.
+  assert.equal((await f.request('GET','/api/audit',undefined,f.token)).status,403);
+});

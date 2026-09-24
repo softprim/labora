@@ -3,6 +3,8 @@ contextBridge.exposeInMainWorld('labora',Object.freeze({
   config:()=>ipcRenderer.invoke('config'),
   api:(method,path,body)=>ipcRenderer.invoke('api',{method,path,body}),
   connect:()=>ipcRenderer.invoke('connect'),
+  serverStatus:()=>ipcRenderer.invoke('server-status'),
+  discover:()=>ipcRenderer.invoke('discover'),
   send:message=>ipcRenderer.invoke('send',message),
   setServer:url=>ipcRenderer.invoke('set-server',url),
   project:()=>ipcRenderer.invoke('project'),

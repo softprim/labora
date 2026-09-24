@@ -4,14 +4,25 @@ const path=require('node:path');
 const {spawn}=require('node:child_process');
 const WebSocket=require('ws');
 const {pathToFileURL}=require('node:url');
+const host=require('./host.cjs');
 let win,projection,socket,config,authToken=null,lessonActive=false,controlActive=false,reconnectTimer,inputProcess;
 let shuttingDown=false,locked=false,lastServerMessage=0,projectionApproved=false;
+let serverState={running:false,restarts:0},serverLog=[];
 const configPath=process.platform==='win32'?path.join(process.env.ProgramData||'C:\\ProgramData','Labora','device.json'):process.env.LABORA_DEVICE_CONFIG;
 const indexPath=path.join(__dirname,'ui','index.html');
 const localURL=pathToFileURL(indexPath).href;
 function loadConfig(){
   if(configPath&&existsSync(configPath))return {...JSON.parse(readFileSync(configPath,'utf8').replace(/^\uFEFF/,'')),managed:true};
   return {serverUrl:'http://127.0.0.1:4310',role:'admin',managed:false};
+}
+// Calculatorul profesorului găzduiește serverul laboratorului: nu depinde de alt calculator.
+function shouldHostServer(){return config.role==='teacher'&&config.managed&&process.env.LABORA_NO_HOST!=='1';}
+function startHostedServer(){
+  if(!shouldHostServer())return;
+  host.start({
+    onLog:line=>{serverLog=[...serverLog,line].slice(-100);emit({type:'server-log',line});},
+    onState:st=>{serverState=st;emit({type:'server-state',...st});if(st.running)setTimeout(connect,1500);}
+  });
 }
 function validateServer(url){
   const u=new URL(url);if(u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('Adresa trebuie să conțină doar protocolul, serverul și portul.');
@@ -74,6 +85,13 @@ app.whenReady().then(()=>{
     return data;
   });
   ipcMain.handle('connect',event=>{trusted(event);connect();return true;});
+  ipcMain.handle('server-status',event=>{trusted(event);return {hosting:shouldHostServer(),...serverState,log:serverLog.slice(-30)};});
+  // Căutarea serverului în LAN: elimină tastarea adreselor la configurarea laboratorului.
+  ipcMain.handle('discover',async event=>{
+    trusted(event);if(config.managed)throw Error('Configurația este administrată de IT.');
+    const {discover}=await import(pathToFileURL(path.join(__dirname,'..','server','discovery.mjs')).href);
+    return await discover({timeout:3000});
+  });
   ipcMain.handle('send',(event,message)=>{trusted(event);if(!socket||socket.readyState!==WebSocket.OPEN)throw Error('Conexiune întreruptă.');if(JSON.stringify(message).length>65000)throw Error('Mesaj prea mare.');if(message.type==='auth')throw Error('Mesaj nepermis.');socket.send(JSON.stringify(message));return true;});
   ipcMain.handle('project',event=>{
     trusted(event);if(config.role!=='teacher'||!lessonActive||!projectionApproved)throw Error('Selectați un ecran în timpul orei.');
@@ -89,7 +107,7 @@ app.whenReady().then(()=>{
   powerMonitor.on('lock-screen',()=>{locked=true;socket?.close();stopMedia();});powerMonitor.on('unlock-screen',()=>{locked=false;connect();});
   powerMonitor.on('suspend',()=>{locked=true;socket?.close();stopMedia();});powerMonitor.on('resume',()=>{locked=false;connect();});
   setInterval(()=>{if(socket?.readyState===WebSocket.OPEN&&Date.now()-lastServerMessage>25000){socket.terminate();stopMedia();}},5000).unref();
-  win.loadFile(indexPath);win.webContents.on('did-finish-load',()=>{if(config.role==='student')connect();});
+  win.loadFile(indexPath);win.webContents.on('did-finish-load',()=>{startHostedServer();if(config.role==='student')connect();});
 });
-app.on('before-quit',()=>{shuttingDown=true;clearTimeout(reconnectTimer);socket?.close();stopInput();});
+app.on('before-quit',()=>{shuttingDown=true;clearTimeout(reconnectTimer);socket?.close();stopInput();host.stop();});
 app.on('window-all-closed',()=>app.quit());

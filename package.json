@@ -14,7 +14,8 @@
     "check": "node scripts/check.mjs",
     "dist:win": "electron-builder --win nsis --x64 --publish never",
     "dev": "node tests/browser-harness.mjs",
-    "test:ui": "node tests/ui-integration.mjs"
+    "test:ui": "node tests/ui-integration.mjs",
+    "verify": "node scripts/verify-lab.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -32,6 +33,8 @@
     "productName": "Labora",
     "files": [
       "desktop/**/*",
+      "server/**/*",
+      "node_modules/ws/**/*",
       "package.json"
     ],
     "extraResources": [
